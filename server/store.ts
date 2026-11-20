@@ -117,6 +117,90 @@ async function persistStore(data: UniverseData): Promise<void> {
   await writeQueue;
 }
 
+export interface SecurityOverrides {
+  adminUsername?: string;
+  adminPasswordHash?: string;
+  accessCodeHash?: string;
+  updatedAt: string;
+}
+
+const SECURITY_KV_KEY = 'mehaks_little_universe:v1:security';
+const SECURITY_FILE = path.join(DATA_DIR, 'security.json');
+let cachedSecurity: SecurityOverrides | null = null;
+let securityWriteQueue: Promise<void> = Promise.resolve();
+
+export function getStorageMode(): 'kv' | 'local-file' | 'vercel-tmp' {
+  if (USE_KV) return 'kv';
+  if (IS_VERCEL) return 'vercel-tmp';
+  return 'local-file';
+}
+
+export async function getSecurityOverrides(): Promise<SecurityOverrides | null> {
+  if (USE_KV) {
+    try {
+      const res = await fetch(`${KV_URL}/get/${encodeURIComponent(SECURITY_KV_KEY)}`, {
+        headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      });
+      if (!res.ok) return null;
+      const json = (await res.json()) as { result?: string | null };
+      if (!json.result) return null;
+      const parsed =
+        typeof json.result === 'string'
+          ? (JSON.parse(json.result) as SecurityOverrides)
+          : (json.result as SecurityOverrides);
+      cachedSecurity = parsed;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+  if (cachedSecurity) return cachedSecurity;
+  try {
+    const raw = await fs.readFile(SECURITY_FILE, 'utf8');
+    cachedSecurity = JSON.parse(raw) as SecurityOverrides;
+    return cachedSecurity;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveSecurityOverrides(
+  updater: (current: SecurityOverrides) => SecurityOverrides
+): Promise<SecurityOverrides> {
+  const current = (await getSecurityOverrides()) ?? {
+    updatedAt: new Date().toISOString(),
+  };
+  const next: SecurityOverrides = {
+    ...updater({ ...current }),
+    updatedAt: new Date().toISOString(),
+  };
+  cachedSecurity = next;
+
+  if (USE_KV) {
+    const res = await fetch(`${KV_URL}/set/${encodeURIComponent(SECURITY_KV_KEY)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${KV_TOKEN}`,
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+      body: JSON.stringify(next),
+    });
+    if (!res.ok) {
+      throw new Error(`Security persistence failed (${res.status})`);
+    }
+    return next;
+  }
+
+  securityWriteQueue = securityWriteQueue.then(async () => {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    const tempPath = `${SECURITY_FILE}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(next, null, 2), 'utf8');
+    await fs.rename(tempPath, SECURITY_FILE);
+  });
+  await securityWriteQueue;
+  return next;
+}
+
 export async function getUniverseData(): Promise<UniverseData> {
   const data = await ensureLoaded();
   return structuredClone(data);

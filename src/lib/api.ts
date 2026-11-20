@@ -2,6 +2,7 @@ import type {
   ActiveSessionState,
   ActivityEvent,
   ActivityEventType,
+  AdminSecurityStatus,
   AnswerCategory,
   AnswerRecord,
   BucketItem,
@@ -283,6 +284,31 @@ export const api = {
 
   getAdminData(): Promise<UniverseData> {
     return request<UniverseData>('/api/admin/data');
+  },
+
+  getAdminSecurity(): Promise<AdminSecurityStatus> {
+    return request<AdminSecurityStatus>('/api/admin/security');
+  },
+
+  updateAdminCredentials(payload: {
+    currentPassword: string;
+    newUsername?: string;
+    newPassword: string;
+  }): Promise<AdminSecurityStatus> {
+    return request<AdminSecurityStatus>('/api/admin/security/admin-credentials', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateUniverseAccessCode(payload: {
+    newAccessCode: string;
+    accessHint?: string;
+  }): Promise<AdminSecurityStatus> {
+    return request<AdminSecurityStatus>('/api/admin/security/access-code', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
   },
 
   updateSettings(settings: Partial<SiteSettings>): Promise<SiteSettings> {

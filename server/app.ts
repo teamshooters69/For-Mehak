@@ -6,18 +6,25 @@ import {
   clearAdminLoginFailures,
   clearSessionCookie,
   createSessionToken,
+  getAdminSecurityStatus,
   hasAdminSession,
   hasUniverseSession,
+  hashSecret,
   recordFailedAdminLogin,
   requireAdminAuth,
   requireUniverseAccess,
+  requiresCustomAdminUsername,
   setSessionCookie,
   verifyAccessCode,
   verifyAdminCredentials,
+  verifyAdminPasswordOnly,
 } from './auth.ts';
 import {
+  getSecurityOverrides,
+  getStorageMode,
   getUniverseData,
   replaceUniverseData,
+  saveSecurityOverrides,
   updateUniverseData,
 } from './store.ts';
 import { validateUniverseBackup } from '../src/utils/logic.ts';
@@ -127,12 +134,16 @@ export function createApiApp(): express.Express {
 
   app.get('/api/auth/session', async (req, res) => {
     try {
-      const data = await getUniverseData();
+      const [data, overrides] = await Promise.all([
+        getUniverseData(),
+        getSecurityOverrides(),
+      ]);
       res.json({
         universeUnlocked: hasUniverseSession(req),
         isAdmin: hasAdminSession(req),
         requiresAccessCode: true,
         accessHint: data.settings.accessHint,
+        adminRequiresUsername: requiresCustomAdminUsername(overrides),
       });
     } catch (error) {
       console.error('Session lookup failed:', error);
@@ -142,7 +153,8 @@ export function createApiApp(): express.Express {
 
   app.post('/api/auth/unlock', async (req, res) => {
     const code = typeof req.body?.code === 'string' ? req.body.code : '';
-    if (!verifyAccessCode(code)) {
+    const overrides = await getSecurityOverrides();
+    if (!verifyAccessCode(code, overrides)) {
       res.status(401).json({
         error: 'That passcode did not unlock the gate. Try again with the hint below.',
       });
@@ -168,7 +180,7 @@ export function createApiApp(): express.Express {
     res.json({ ok: true });
   });
 
-  app.post('/api/admin/login', (req, res) => {
+  app.post('/api/admin/login', async (req, res) => {
     const rate = checkAdminLoginRateLimit(req);
     if (!rate.allowed) {
       res.setHeader('Retry-After', String(rate.retryAfterSeconds));
@@ -180,8 +192,9 @@ export function createApiApp(): express.Express {
 
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const overrides = await getSecurityOverrides();
 
-    if (!verifyAdminCredentials(username, password)) {
+    if (!verifyAdminCredentials(username, password, overrides)) {
       recordFailedAdminLogin(req);
       res.status(401).json({ error: 'Invalid owner credentials.' });
       return;
@@ -768,6 +781,74 @@ export function createApiApp(): express.Express {
     const data = await getUniverseData();
     ensureActiveSession(data);
     res.json(data);
+  });
+
+  app.get('/api/admin/security', requireAdminAuth, async (_req, res) => {
+    const overrides = await getSecurityOverrides();
+    res.json(getAdminSecurityStatus(overrides, getStorageMode()));
+  });
+
+  app.put('/api/admin/security/admin-credentials', requireAdminAuth, async (req, res) => {
+    const currentPassword =
+      typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword =
+      typeof req.body?.newPassword === 'string' ? req.body.newPassword.trim() : '';
+    const newUsername =
+      typeof req.body?.newUsername === 'string' ? req.body.newUsername.trim() : '';
+
+    const overrides = await getSecurityOverrides();
+    if (!verifyAdminPasswordOnly(currentPassword, overrides)) {
+      res.status(401).json({ error: 'Current owner password does not match.' });
+      return;
+    }
+    if (newPassword.length < 6) {
+      res.status(400).json({ error: 'New owner password must be at least 6 characters.' });
+      return;
+    }
+    if (newUsername && newUsername.length < 2) {
+      res.status(400).json({ error: 'Owner username must be at least 2 characters.' });
+      return;
+    }
+
+    try {
+      const saved = await saveSecurityOverrides((prev) => ({
+        ...prev,
+        adminPasswordHash: hashSecret(newPassword),
+        ...(newUsername ? { adminUsername: newUsername.slice(0, 64) } : {}),
+      }));
+      res.json(getAdminSecurityStatus(saved, getStorageMode()));
+    } catch (error) {
+      console.error('Failed updating owner credentials:', error);
+      res.status(500).json({ error: 'Could not save new owner password.' });
+    }
+  });
+
+  app.put('/api/admin/security/access-code', requireAdminAuth, async (req, res) => {
+    const newAccessCode =
+      typeof req.body?.newAccessCode === 'string' ? req.body.newAccessCode.trim() : '';
+    const accessHint =
+      typeof req.body?.accessHint === 'string' ? req.body.accessHint.trim() : undefined;
+
+    if (newAccessCode.length < 3) {
+      res.status(400).json({ error: 'Mehak gate passcode must be at least 3 characters.' });
+      return;
+    }
+
+    try {
+      const saved = await saveSecurityOverrides((prev) => ({
+        ...prev,
+        accessCodeHash: hashSecret(newAccessCode.toLowerCase()),
+      }));
+      if (accessHint !== undefined) {
+        await updateUniverseData((draft) => {
+          draft.settings.accessHint = accessHint.slice(0, 180);
+        });
+      }
+      res.json(getAdminSecurityStatus(saved, getStorageMode()));
+    } catch (error) {
+      console.error('Failed updating gate passcode:', error);
+      res.status(500).json({ error: 'Could not save new gate passcode.' });
+    }
   });
 
   app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {

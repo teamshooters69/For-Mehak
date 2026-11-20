@@ -356,4 +356,15 @@ export interface SessionInfo {
   isAdmin: boolean;
   requiresAccessCode: boolean;
   accessHint: string;
+  adminRequiresUsername?: boolean;
+}
+
+export interface AdminSecurityStatus {
+  usingDefaultAdminPassword: boolean;
+  usingDefaultAccessCode: boolean;
+  requiresCustomUsername: boolean;
+  adminPasswordSource: 'env' | 'panel' | 'configured' | 'default';
+  accessCodeSource: 'env' | 'panel' | 'default';
+  storageMode: 'kv' | 'local-file' | 'vercel-tmp';
+  durableStorageActive: boolean;
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
+  AlertTriangle,
   ArrowLeft,
   Download,
   Eye,
@@ -19,7 +20,9 @@ import {
   OwnerInsightsViews,
   type InsightSection,
 } from './admin/OwnerInsightsViews';
+import { SecurityPasscodesPanel } from './admin/SecurityPasscodesPanel';
 import type {
+  AdminSecurityStatus,
   DareIntensity,
   DareMode,
   DestinationCategory,
@@ -30,12 +33,14 @@ import type {
 
 interface AdminPanelProps {
   isAdmin: boolean;
+  requiresUsername?: boolean;
   onAuthChange: (isAdmin: boolean) => void;
   onExitAdmin: () => void;
   onUniverseMutated: () => void;
 }
 
 type ContentSection =
+  | 'security'
   | 'welcome'
   | 'questions'
   | 'tod'
@@ -51,6 +56,7 @@ type ContentSection =
   | 'backup';
 
 const CONTENT_TABS: Array<{ id: ContentSection; label: string }> = [
+  { id: 'security', label: 'Security & Passcodes' },
   { id: 'welcome', label: 'Welcome & Settings' },
   { id: 'questions', label: 'Questions' },
   { id: 'tod', label: 'Truth or Dare' },
@@ -68,6 +74,7 @@ const CONTENT_TABS: Array<{ id: ContentSection; label: string }> = [
 
 export function AdminPanel({
   isAdmin,
+  requiresUsername = false,
   onAuthChange,
   onExitAdmin,
   onUniverseMutated,
@@ -82,10 +89,11 @@ export function AdminPanel({
   const [insightSection, setInsightSection] =
     useState<InsightSection>('overview');
   const [contentSection, setContentSection] =
-    useState<ContentSection>('welcome');
+    useState<ContentSection>('security');
   const [sessionFilter, setSessionFilter] = useState<string>('all');
 
   const [data, setData] = useState<UniverseData | null>(null);
+  const [security, setSecurity] = useState<AdminSecurityStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [errBanner, setErrBanner] = useState<string | null>(null);
@@ -154,8 +162,12 @@ export function AdminPanel({
     setLoading(true);
     setErrBanner(null);
     try {
-      const full = await api.getAdminData();
+      const [full, sec] = await Promise.all([
+        api.getAdminData(),
+        api.getAdminSecurity(),
+      ]);
       setData(full);
+      setSecurity(sec);
       setWelcomeHeading(full.settings.welcomeHeading);
       setWelcomeSubtitle(full.settings.welcomeSubtitle);
       setAccessHint(full.settings.accessHint);
@@ -184,8 +196,12 @@ export function AdminPanel({
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
-    if (!username.trim() || !password.trim()) {
-      setLoginError('Enter both username and password.');
+    if (!password.trim()) {
+      setLoginError('Enter your owner password to sign in.');
+      return;
+    }
+    if (requiresUsername && !username.trim()) {
+      setLoginError('Enter both your owner username and password.');
       return;
     }
     setLoggingIn(true);
@@ -206,6 +222,9 @@ export function AdminPanel({
   async function handleLogout() {
     await api.adminLogout();
     setData(null);
+    setSecurity(null);
+    setMode('insights');
+    setInsightSection('overview');
     onAuthChange(false);
   }
 
@@ -335,7 +354,7 @@ export function AdminPanel({
                 htmlFor="admin-user"
                 className="mb-1.5 block text-xs font-semibold text-[#2E1A24]"
               >
-                Owner Username
+                Owner Username{!requiresUsername ? ' (optional)' : ''}
               </label>
               <input
                 id="admin-user"
@@ -343,7 +362,11 @@ export function AdminPanel({
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter username"
+                placeholder={
+                  requiresUsername
+                    ? 'Enter your owner username'
+                    : 'Optional (leave blank for password-only login)'
+                }
                 className="min-h-[46px] w-full rounded-xl border border-[#702B4C]/20 bg-[#FFF9F5] px-4 text-sm text-[#2E1A24] focus:border-[#702B4C] focus:outline-none"
               />
             </div>
@@ -510,6 +533,29 @@ export function AdminPanel({
           )}
         </div>
 
+        {security?.usingDefaultAdminPassword && (
+          <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-amber-700/25 bg-amber-50/90 px-4 py-3.5 text-xs text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+              <p className="leading-relaxed">
+                <strong>Default owner password is still active.</strong> Set your
+                own private password in Security &amp; Passcodes (or in Vercel
+                Environment Variables) so only you can enter this portal.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('content');
+                setContentSection('security');
+              }}
+              className="min-h-[40px] shrink-0 rounded-xl bg-amber-900 px-3.5 text-xs font-semibold text-amber-50 hover:bg-amber-950"
+            >
+              Update Password
+            </button>
+          </div>
+        )}
+
         {notice && (
           <div
             role="status"
@@ -585,6 +631,21 @@ export function AdminPanel({
               />
             ) : (
               <>
+                {/* 0. Security & Passcodes */}
+                {contentSection === 'security' && (
+                  <SecurityPasscodesPanel
+                    security={security}
+                    currentHint={accessHint}
+                    onSecurityUpdated={setSecurity}
+                    onUniverseMutated={() => {
+                      void loadAdminData();
+                      onUniverseMutated();
+                    }}
+                    onFlash={flash}
+                    onError={setErrBanner}
+                  />
+                )}
+
                 {/* 1. Welcome & Settings */}
                 {contentSection === 'welcome' && (
                   <form onSubmit={saveWelcomeSettings} className="space-y-4">

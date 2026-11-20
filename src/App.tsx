@@ -182,6 +182,7 @@ export default function App() {
       >
         <AdminPanel
           isAdmin={Boolean(session?.isAdmin)}
+          requiresUsername={Boolean(session?.adminRequiresUsername)}
           onAuthChange={(nextIsAdmin) =>
             setSession((prev) =>
               prev

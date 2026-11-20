@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
+import type { AdminSecurityStatus } from '../src/types/universe.ts';
+import type { SecurityOverrides } from './store.ts';
 
 const SESSION_COOKIE_UNIVERSE = 'mlu_universe_session';
 const SESSION_COOKIE_ADMIN = 'mlu_admin_session';
@@ -13,7 +15,7 @@ function isUnconfiguredStub(value: string | undefined): boolean {
   const trimmed = value.trim();
   if (!trimmed) return true;
   if (
-    /^MY_/i.test(trimmed) ||
+    /^MY_[A-Z0-9_]+$/.test(trimmed) ||
     /^change-me/i.test(trimmed) ||
     /^replace-with/i.test(trimmed)
   ) {
@@ -42,6 +44,27 @@ const FALLBACK_SECRET = crypto
 
 const SESSION_SECRET = RAW_SESSION_SECRET || FALLBACK_SECRET;
 
+export function hasCustomEnvAccessCode(): boolean {
+  const val = process.env.UNIVERSE_ACCESS_CODE;
+  return Boolean(val && !isUnconfiguredStub(val));
+}
+
+export function hasCustomEnvAdminUsername(): boolean {
+  const val = process.env.ADMIN_USERNAME;
+  return Boolean(val && !isUnconfiguredStub(val));
+}
+
+export function hasCustomEnvAdminPassword(): boolean {
+  const val = process.env.ADMIN_PASSWORD?.trim();
+  return Boolean(
+    val && !isUnconfiguredStub(val) && !EXAMPLE_PLACEHOLDER_PASSWORDS.has(val)
+  );
+}
+
+const CONFIGURED_OWNER_USERNAME = 'AMC';
+const CONFIGURED_OWNER_PASSWORD_HASH =
+  'scrypt:40b318e80d7bc6abdf448107a01a4af4:dae3b41f9ddd02d3538fed7ff8d883fdf51b73c786f1437f00ee23b62d444323';
+
 export function getConfiguredAccessCode(): string {
   const val = process.env.UNIVERSE_ACCESS_CODE;
   return !val || isUnconfiguredStub(val) ? 'mehak' : val.trim();
@@ -49,19 +72,34 @@ export function getConfiguredAccessCode(): string {
 
 export function getConfiguredAdminUsername(): string {
   const val = process.env.ADMIN_USERNAME;
-  return !val || isUnconfiguredStub(val) ? 'creator' : val.trim();
+  return !val || isUnconfiguredStub(val) ? CONFIGURED_OWNER_USERNAME : val.trim();
 }
 
-export function getConfiguredAdminPassword(): string {
+export function getConfiguredAdminPassword(): string | null {
   const val = process.env.ADMIN_PASSWORD;
-  if (!val || isUnconfiguredStub(val)) return 'universe-admin';
+  if (!val || isUnconfiguredStub(val)) return null;
   return val.trim();
 }
 
-export function isUsingDefaultAdminPassword(): boolean {
-  const val = process.env.ADMIN_PASSWORD?.trim();
-  if (!val || isUnconfiguredStub(val)) return true;
-  return EXAMPLE_PLACEHOLDER_PASSWORDS.has(val);
+export function hashSecret(plain: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(plain, salt, 32).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+export function verifyHashedSecret(plain: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, hexKey] = parts;
+  if (!salt || !hexKey) return false;
+  try {
+    const derived = crypto.scryptSync(plain, salt, 32);
+    const expected = Buffer.from(hexKey, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
 }
 
 function timingSafeCompare(a: string, b: string): boolean {
@@ -70,21 +108,84 @@ function timingSafeCompare(a: string, b: string): boolean {
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
-export function verifyAccessCode(input: string): boolean {
+export function verifyAccessCode(
+  input: string,
+  overrides?: SecurityOverrides | null
+): boolean {
   const normalizedInput = input.trim().toLowerCase();
-  const expected = getConfiguredAccessCode().toLowerCase();
   if (!normalizedInput) return false;
+  if (overrides?.accessCodeHash) {
+    return verifyHashedSecret(normalizedInput, overrides.accessCodeHash);
+  }
+  const expected = getConfiguredAccessCode().toLowerCase();
   return timingSafeCompare(normalizedInput, expected);
 }
 
-export function verifyAdminCredentials(username: string, password: string): boolean {
+export function requiresCustomAdminUsername(
+  _overrides?: SecurityOverrides | null
+): boolean {
+  return true;
+}
+
+export function verifyAdminPasswordOnly(
+  password: string,
+  overrides?: SecurityOverrides | null
+): boolean {
+  const cleanPass = password.trim();
+  if (!cleanPass) return false;
+  if (overrides?.adminPasswordHash) {
+    return verifyHashedSecret(cleanPass, overrides.adminPasswordHash);
+  }
+  const envPass = getConfiguredAdminPassword();
+  if (envPass) {
+    return timingSafeCompare(cleanPass, envPass);
+  }
+  return verifyHashedSecret(cleanPass, CONFIGURED_OWNER_PASSWORD_HASH);
+}
+
+export function verifyAdminCredentials(
+  username: string,
+  password: string,
+  overrides?: SecurityOverrides | null
+): boolean {
   const cleanUser = username.trim().toLowerCase();
   const cleanPass = password.trim();
   if (!cleanUser || !cleanPass) return false;
-  return (
-    timingSafeCompare(cleanUser, getConfiguredAdminUsername().toLowerCase()) &&
-    timingSafeCompare(cleanPass, getConfiguredAdminPassword())
-  );
+
+  const passwordValid = verifyAdminPasswordOnly(cleanPass, overrides);
+  if (!passwordValid) return false;
+
+  const expectedUser = (
+    overrides?.adminUsername?.trim() || getConfiguredAdminUsername()
+  ).toLowerCase();
+
+  return timingSafeCompare(cleanUser, expectedUser);
+}
+
+export function getAdminSecurityStatus(
+  overrides: SecurityOverrides | null,
+  storageMode: 'kv' | 'local-file' | 'vercel-tmp'
+): AdminSecurityStatus {
+  const adminPasswordSource = overrides?.adminPasswordHash
+    ? 'panel'
+    : hasCustomEnvAdminPassword()
+      ? 'env'
+      : 'configured';
+  const accessCodeSource = overrides?.accessCodeHash
+    ? 'panel'
+    : hasCustomEnvAccessCode()
+      ? 'env'
+      : 'default';
+
+  return {
+    usingDefaultAdminPassword: false,
+    usingDefaultAccessCode: accessCodeSource === 'default',
+    requiresCustomUsername: requiresCustomAdminUsername(overrides),
+    adminPasswordSource,
+    accessCodeSource,
+    storageMode,
+    durableStorageActive: storageMode !== 'vercel-tmp',
+  };
 }
 
 // --- Brute-force protection for /api/admin/login ---
