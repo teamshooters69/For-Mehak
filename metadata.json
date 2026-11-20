@@ -1,0 +1,6 @@
+{
+  "name": "Mehak's Little Universe",
+  "description": "A personalized, mobile-first romantic interactive digital universe created for Mehak, featuring playful prompts, surprises, mini-games, date planning, and a protected creator dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
